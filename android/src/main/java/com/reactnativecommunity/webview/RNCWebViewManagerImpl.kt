@@ -158,6 +158,7 @@ if (contentDisposition?.endsWith(".HWP") == true || contentDisposition?.endsWith
 
             //Finish setting up request
             request.addRequestHeader("User-Agent", userAgent)
+            request.addRequestHeader("Referer", webView.url ?: "")
             request.setTitle(fileName)
             request.setDescription(downloadMessage)
             request.allowScanningByMediaScanner()
