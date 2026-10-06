@@ -10,15 +10,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
         with:
-          bun-version: 1.3.10
+          node-version: '24.14.0'
+          cache: 'yarn'
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: yarn install --frozen-lockfile
       - name: Install macOS dependencies
         if: false # Enable this if react-native-macos falls behind
-        run: bun run add:macos
+        run: yarn add:macos
       - name: Install Pods
         run: pod install
         working-directory: example/macos
