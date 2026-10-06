@@ -36,19 +36,19 @@
     "macos": "react-native run-macos --scheme WebviewExample --project-path example/macos",
     "start": "react-native start",
     "windows": "install-windows-test-app --project-directory example/windows && react-native run-windows --root example --arch x64",
-    "ci:publish": "bun run semantic-release",
-    "lint:tsgo": "bun run --bun tsgo --noEmit",
-    "lint:oxlint": "bun run --bun oxlint",
-    "lint:oxlint:ci": "bun run --bun oxlint --format=github",
-    "lint:oxfmt": "bun run oxfmt",
-    "lint:oxfmt:ci": "bun run oxfmt --check",
-    "lint": "bun run lint:tsgo && bun run lint:oxlint && bun run lint:oxfmt",
-    "lint:ci": "bun run lint:tsgo && bun run lint:oxlint:ci && bun run lint:oxfmt:ci",
+    "ci:publish": "yarn semantic-release",
+    "lint:tsgo": "yarn tsgo --noEmit",
+    "lint:oxlint": "yarn oxlint",
+    "lint:oxlint:ci": "yarn oxlint --format=github",
+    "lint:oxfmt": "yarn oxfmt",
+    "lint:oxfmt:ci": "yarn oxfmt --check",
+    "lint": "yarn lint:tsgo && yarn lint:oxlint && yarn lint:oxfmt",
+    "lint:ci": "yarn lint:tsgo && yarn lint:oxlint:ci && yarn lint:oxfmt:ci",
     "build": "babel --extensions \".ts,.tsx\" --out-dir lib src",
     "prepare:types": "tsgo --noEmit false --emitDeclarationOnly --declaration --rootDir src --outDir lib",
     "prepare": "yarn prepare:types && yarn build",
-    "test:windows": "bun run jest --setupFiles=./jest-setups/jest.setup.js",
-    "add:macos": "bun run --bun add react-native-macos@0.73.17"
+    "test:windows": "yarn jest --setupFiles=./jest-setups/jest.setup.js",
+    "add:macos": "yarn add react-native-macos@0.73.17"
   },
   "dependencies": {
     "escape-string-regexp": "^4.0.0",
@@ -94,6 +94,7 @@
     "react": "*",
     "react-native": "*"
   },
+  "packageManager": "yarn@1.22.22",
   "codegenConfig": {
     "name": "RNCWebViewSpec",
     "type": "all",
