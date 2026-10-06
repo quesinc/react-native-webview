@@ -97,7 +97,7 @@ $ yarn add ../react-native-webview
 ## Notes
 
 - We use TypeScript.
-- After pulling this repo and installing all dependencies, you can run lint using the command: `bun run lint`
+- After pulling this repo and installing all dependencies, you can run lint using the command: `yarn lint`
 
 ## Translations
 
