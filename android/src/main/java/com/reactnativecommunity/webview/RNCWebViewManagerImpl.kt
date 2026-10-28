@@ -24,15 +24,10 @@ import com.facebook.react.common.build.ReactBuildConfig
 import com.facebook.react.uimanager.ThemedReactContext
 import org.json.JSONException
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.UnsupportedEncodingException
 import java.net.MalformedURLException
 import java.net.URL
-import java.nio.charset.Charset
-import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.regex.Matcher
-import java.util.regex.Pattern
 
 val invalidCharRegex = "[\\\\/%\"]".toRegex()
 
@@ -106,41 +101,7 @@ class RNCWebViewManagerImpl(private val newArch: Boolean = false) {
             }
             var fileName = URLUtil.guessFileName(url, contentDisposition, mimetype)
 
-if (fileName.endsWith(";")) {
-    fileName = fileName.substring(0, fileName.length - 1) // length() → length
-}
-
-            if (fileName.endsWith(".bin")) {
-                val p = Pattern.compile("\"([^\"]*)\"")
-                val m = p.matcher(fileName)
-                fileName = if (m.find()) {
-                    m.group()
-                } else {
-                    fileName.substring(0, (fileName.length - 4))
-                }
-            }
-
-if (contentDisposition?.startsWith("attachment; filename=\"=?UTF-8?") == true) {
-    val pattern = "filename=\"(.*?)\""
-    val r = Pattern.compile(pattern)
-    val m = r.matcher(contentDisposition)
-    if (m.find()) {
-        try {
-            fileName = FileNameDecoder.decodeFileName(contentDisposition)
-        } catch (_: Exception) { }
-    }
-}
-
-/* === (요청) 원본 .HWP 체크 로직 유지, 단 null-safe 만 추가 === */
-if (contentDisposition?.endsWith(".HWP") == true || contentDisposition?.endsWith(".hwp") == true) {
-    if (!fileName.endsWith(".HWP") && !fileName.endsWith(".hwp")) {
-        fileName = "$fileName.hwp" // toString() 불필요하지만 동작 동일
-    }
-}
-/* ======================================================== */
-
-
-          // Sanitize filename by replacing invalid characters with "_"
+            // Sanitize filename by replacing invalid characters with "_"
             fileName = fileName.replace(invalidCharRegex, "_")
 
             val downloadMessage = "Downloading $fileName"
@@ -759,93 +720,6 @@ if (contentDisposition?.endsWith(".HWP") == true || contentDisposition?.endsWith
         val view = viewWrapper.webView
         if (WebViewFeature.isFeatureSupported(WebViewFeature.PAYMENT_REQUEST)) {
             WebSettingsCompat.setPaymentRequestEnabled(view.settings, enabled)
-        }
-    }
-}
-
-internal object FileNameDecoder {
-
-    // =?charset?Q?....?= or =?charset?B?....?= 여러 개를 이어붙인 형태 지원
-    fun decodeFileName(encodedFileName: String?): String {
-        if (encodedFileName.isNullOrEmpty()) return ""
-
-        val pattern: Pattern = Pattern.compile("=\\?([^?]+)\\?([bBqQ])\\?([^?]+)\\?=")
-        val matcher: Matcher = pattern.matcher(encodedFileName)
-
-        val sb = StringBuilder()
-        var lastEnd = 0
-
-        while (matcher.find()) {
-            // encoded-word 앞의 일반 텍스트 유지
-            if (matcher.start() > lastEnd) {
-                sb.append(encodedFileName.substring(lastEnd, matcher.start()))
-            }
-
-            val charsetName = matcher.group(1) // 예: UTF-8, EUC-KR
-            val type = matcher.group(2)        // Q or B
-            val encoded = matcher.group(3)
-
-            val cs: Charset = runCatching { Charset.forName(charsetName) }
-                .getOrDefault(StandardCharsets.UTF_8)
-
-            val decodedSegment: String = if (type.equals("Q", ignoreCase = true)) {
-                // RFC 2047 Q-encoding: '_' -> ' '
-                val q = encoded.replace('_', ' ')
-                val bytes = decodeQuotedPrintable(q) ?: ByteArray(0)
-                String(bytes, cs)
-            } else {
-                // Base64
-                val bytes = android.util.Base64.decode(encoded, android.util.Base64.DEFAULT)
-                String(bytes, cs)
-            }
-
-            sb.append(decodedSegment)
-            lastEnd = matcher.end()
-        }
-
-        // 남은 일반 텍스트가 있다면 덧붙임
-        if (lastEnd < encodedFileName.length) {
-            sb.append(encodedFileName.substring(lastEnd))
-        }
-
-        // 큰따옴표만 제거, 공백은 보존 (필요시 trim)
-        return sb.toString()
-            .replace("\"", "")
-            .trim()
-    }
-
-    /**
-     * RFC 2047 Q-encoding에서 사용되는 quoted-printable 유사 디코딩
-     * - '=' 뒤의 두 자리 hex를 바이트로
-     * - CRLF soft line-break는 일반적으로 encoded-word엔 없음
-     */
-    private fun decodeQuotedPrintable(encoded: String): ByteArray? {
-        return try {
-            val bytes = encoded.toByteArray(StandardCharsets.US_ASCII)
-            val out = ByteArrayOutputStream()
-            var i = 0
-            while (i < bytes.size) {
-                val b = bytes[i]
-                if (b == '='.code.toByte()) {
-                    if (i + 2 < bytes.size) {
-                        val hex = byteArrayOf(bytes[i + 1], bytes[i + 2])
-                        val v = Integer.parseInt(String(hex, StandardCharsets.US_ASCII), 16)
-                        out.write(v)
-                        i += 3
-                        continue
-                    } else {
-                        // 잘린 '=' 시퀀스는 무시
-                        i++
-                        continue
-                    }
-                } else {
-                    out.write(b.toInt())
-                    i++
-                }
-            }
-            out.toByteArray()
-        } catch (e: Exception) {
-            null
         }
     }
 }
