@@ -23,18 +23,28 @@
  *   CONTENT_DISPOSITION_PATTERN and parseContentDisposition
  * - Improve CONTENT_DISPOSITION_PATTERN and parseContentDisposition to add
  *   support for the "filename*" parameter in content disposition
+ * - Replace CONTENT_DISPOSITION_PATTERN with a parameter parser that does not
+ *   depend on the disposition type, the order of parameters or extra
+ *   parameters, and decode RFC 2047 encoded words and percent-encoded
+ *   UTF-8 / CP949 file names
  */
 
 package com.reactnativecommunity.webview;
 
 import android.net.Uri;
+import android.util.Base64;
 import android.webkit.MimeTypeMap;
 import androidx.annotation.Nullable;
 
-import java.io.UnsupportedEncodingException;
-import java.net.URLDecoder;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -136,56 +146,169 @@ public final class URLUtil {
         return filename + extension;
     }
 
-    /** Regex used to parse content-disposition headers */
-    private static final Pattern CONTENT_DISPOSITION_PATTERN =
-            Pattern.compile("attachment(?:;\\s*filename\\s*=\\s*(\"?)([^\"]*)\\1)?(?:;\\s*filename\\s*\\*\\s*=\\s*([^']*)'[^']*'([^']*))?\\s*$",
-                    Pattern.CASE_INSENSITIVE);
+    /** Regex used to find the parameters of content-disposition headers */
+    private static final Pattern PARAMETER_PATTERN =
+            Pattern.compile("([^\\s;=]+)\\s*=\\s*(\"(?:\\\\.|[^\"\\\\])*\"?|[^;]*)");
+
+    /** RFC 5987: charset'language'percent-encoded value */
+    private static final Pattern EXTENDED_VALUE_PATTERN = Pattern.compile("([^']*)'[^']*'(.*)");
+
+    /** RFC 2047: =?charset?B|Q?encoded text?= */
+    private static final Pattern ENCODED_WORD_PATTERN =
+            Pattern.compile("=\\?([^?]+)\\?([bBqQ])\\?([^?]*)\\?=");
+
+    private static final Pattern PERCENT_ENCODED_PATTERN = Pattern.compile("%[0-9a-fA-F]{2}");
+
+    private static final String[] FALLBACK_CHARSETS = {"UTF-8", "MS949", "EUC-KR"};
 
     /**
      * Parse the Content-Disposition HTTP Header. The format of the header
      * is defined here: <a href="https://www.rfc-editor.org/rfc/rfc6266">RFC 6266</a>
      * This header provides a filename for content that is going to be
-     * downloaded to the file system. We only support the attachment type.
+     * downloaded to the file system.
+     * filename*을 filename보다 먼저 쓰고, disposition 종류(attachment·inline)와
+     * 파라미터 순서·개수는 서버마다 달라서 보지 않는다.
      */
+    @Nullable
     static String parseContentDisposition(String contentDisposition) {
         try {
-            // The regex attempts to match the following pattern:
-            //     attachment; filename="(Group 2)"; filename*=(Group 3)'(lang)'(Group 4)
-            // Group 4 refers to the percent-encoded filename, and the charset
-            // is specified in Group 3.
-            // Group 2 is the fallback filename.
-            // Group 1 refers to the quotation marks around Group 2.
-            //
-            // Test cases can be found at http://test.greenbytes.de/tech/tc2231/
-            // Examples can be found at https://www.rfc-editor.org/rfc/rfc6266#section-5
-            // There are a few known limitations:
-            // - any Content Disposition value that does not have parameters
-            //   arranged in the order of "attachment...filename...filename*"
-            //   or contains extra parameters shall fail to be parsed
-            // - any filename that contains " shall fail to be parsed
-            Matcher m = CONTENT_DISPOSITION_PATTERN.matcher(contentDisposition);
-            if (m.find()) {
-                if (m.group(3) != null && m.group(4) != null) {
-                    String filename = m.group(4);
-                    try {
-                        filename = URLDecoder.decode(filename, StandardCharsets.UTF_8.name());
-                        return filename;
-                    } catch (UnsupportedEncodingException e) {
-                        return filename;
-                    }
-                }
-                String filename = m.group(2);
-                try {
-                    filename = URLDecoder.decode(filename, StandardCharsets.UTF_8.name());
-                    return filename;
-                } catch (UnsupportedEncodingException e) {
+            Map<String, String> parameters = parseParameters(contentDisposition);
+
+            String extendedFilename = parameters.get("filename*");
+            if (extendedFilename != null) {
+                String filename = decodeExtendedValue(extendedFilename);
+                if (!filename.trim().isEmpty()) {
                     return filename;
                 }
             }
-        } catch (IllegalStateException ex) {
-            // This function is defined as returning null when it can't parse the header
+
+            String filename = parameters.get("filename");
+            if (filename != null) {
+                return decodeFilenameValue(filename);
+            }
+        } catch (RuntimeException ex) {
+            // 헤더를 읽지 못하면 null을 돌려 URL에서 파일명을 찾게 한다
         }
         return null;
+    }
+
+    private static Map<String, String> parseParameters(String header) {
+        Map<String, String> parameters = new HashMap<>();
+        Matcher matcher = PARAMETER_PATTERN.matcher(header);
+        while (matcher.find()) {
+            String name = matcher.group(1).toLowerCase(Locale.ROOT);
+            if (!parameters.containsKey(name)) {
+                parameters.put(name, unquote(matcher.group(2).trim()));
+            }
+        }
+        return parameters;
+    }
+
+    private static String unquote(String value) {
+        if (!value.startsWith("\"")) {
+            return value;
+        }
+
+        String quoted = value.length() > 1 && value.endsWith("\"")
+                ? value.substring(1, value.length() - 1)
+                : value.substring(1);
+        return quoted.replaceAll("\\\\([\"\\\\])", "$1");
+    }
+
+    private static String decodeExtendedValue(String value) {
+        Matcher matcher = EXTENDED_VALUE_PATTERN.matcher(value);
+        if (!matcher.matches()) {
+            return decodeFilenameValue(value);
+        }
+
+        byte[] bytes = percentDecodeToBytes(matcher.group(2));
+        String decoded = decodeBytes(bytes, matcher.group(1));
+        if (decoded == null) {
+            decoded = decodeBytesWithFallback(bytes);
+        }
+        return decoded != null ? decoded : matcher.group(2);
+    }
+
+    private static String decodeFilenameValue(String value) {
+        if (ENCODED_WORD_PATTERN.matcher(value).find()) {
+            return decodeEncodedWords(value);
+        }
+
+        if (PERCENT_ENCODED_PATTERN.matcher(value).find()) {
+            String decoded = decodeBytesWithFallback(percentDecodeToBytes(value));
+            return decoded != null ? decoded : value;
+        }
+
+        return value;
+    }
+
+    private static String decodeEncodedWords(String value) {
+        // 이어진 encoded-word 사이의 공백은 무시한다 (RFC 2047)
+        String joined = value.replaceAll("\\?=\\s+=\\?", "?==?");
+        Matcher matcher = ENCODED_WORD_PATTERN.matcher(joined);
+        StringBuilder decoded = new StringBuilder();
+        int lastEnd = 0;
+        while (matcher.find()) {
+            decoded.append(joined, lastEnd, matcher.start());
+            String word = decodeEncodedWord(matcher.group(1), matcher.group(2), matcher.group(3));
+            decoded.append(word != null ? word : matcher.group());
+            lastEnd = matcher.end();
+        }
+        return decoded.append(joined.substring(lastEnd)).toString();
+    }
+
+    @Nullable
+    private static String decodeEncodedWord(String charset, String encoding, String text) {
+        try {
+            byte[] bytes = "B".equalsIgnoreCase(encoding)
+                    ? Base64.decode(text, Base64.DEFAULT)
+                    : percentDecodeToBytes(text.replace('_', ' ').replaceAll("=([0-9a-fA-F]{2})", "%$1"));
+            return decodeBytes(bytes, charset);
+        } catch (IllegalArgumentException ex) {
+            return null;
+        }
+    }
+
+    private static byte[] percentDecodeToBytes(String value) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        Matcher matcher = PERCENT_ENCODED_PATTERN.matcher(value);
+        int lastEnd = 0;
+        while (matcher.find()) {
+            byte[] plain = value.substring(lastEnd, matcher.start()).getBytes(StandardCharsets.UTF_8);
+            bytes.write(plain, 0, plain.length);
+            bytes.write(Integer.parseInt(matcher.group().substring(1), 16));
+            lastEnd = matcher.end();
+        }
+        byte[] plain = value.substring(lastEnd).getBytes(StandardCharsets.UTF_8);
+        bytes.write(plain, 0, plain.length);
+        return bytes.toByteArray();
+    }
+
+    /** UTF-8, CP949 순으로 읽어 보고, 어느 쪽으로도 읽히지 않으면 null */
+    @Nullable
+    private static String decodeBytesWithFallback(byte[] bytes) {
+        for (String charset : FALLBACK_CHARSETS) {
+            String decoded = decodeBytes(bytes, charset);
+            if (decoded != null) {
+                return decoded;
+            }
+        }
+        return null;
+    }
+
+    /** 지원하지 않는 charset이거나 그 charset으로 읽히지 않는 바이트면 null */
+    @Nullable
+    private static String decodeBytes(byte[] bytes, String charset) {
+        try {
+            return Charset.forName(charset.trim())
+                    .newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+        } catch (CharacterCodingException | IllegalArgumentException ex) {
+            return null;
+        }
     }
 
     public static String getExtension(String filename) {
