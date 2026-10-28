@@ -27,6 +27,10 @@
  *   depend on the disposition type, the order of parameters or extra
  *   parameters, and decode RFC 2047 encoded words and percent-encoded
  *   UTF-8 / CP949 file names
+ * - Keep the extension of a file name taken from the URL when the mime type
+ *   does not tell the file format (e.g. application/octet-stream), add an
+ *   extension from the mime type only to a file name without one, and stop
+ *   cutting a file name at its first dot
  */
 
 package com.reactnativecommunity.webview;
@@ -42,9 +46,12 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -64,7 +71,7 @@ public final class URLUtil {
             @Nullable String contentDisposition,
             @Nullable String mimeType) {
         String filename = null;
-        String extension = null;
+        boolean isFilenameFromUrl = false;
 
         // If we couldn't do anything with the hint, move toward the content disposition
         if (filename == null && contentDisposition != null) {
@@ -74,10 +81,12 @@ public final class URLUtil {
                 if (index > 0) {
                     filename = filename.substring(index);
                 }
+                filename = filename.trim();
+                if (filename.isEmpty()) {
+                    filename = null;
+                }
             }
         }
-
-        extension = getExtension(filename);
 
         // If all the other http-related approaches failed, use the plain uri
         if (filename == null) {
@@ -92,6 +101,7 @@ public final class URLUtil {
                     int index = decodedUrl.lastIndexOf('/') + 1;
                     if (index > 0) {
                         filename = decodedUrl.substring(index);
+                        isFilenameFromUrl = true;
                     }
                 }
             }
@@ -102,48 +112,86 @@ public final class URLUtil {
             filename = "downloadfile";
         }
 
-        // Split filename between base and extension
+        String normalizedMimeType = normalizeMimeType(mimeType);
+        String mimeTypeExtension = getExtensionFromMimeType(normalizedMimeType);
+        String extension = getExtension(filename);
+
         // Add an extension if filename does not have one
-        int dotIndex = filename.indexOf('.');
-        if (dotIndex < 0) {
-            if (extension == null && mimeType != null) {
-                extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
-                if (extension != null) {
-                    extension = "." + extension;
-                }
-            }
-            if (extension == null) {
-                if (mimeType != null && mimeType.toLowerCase(Locale.ROOT).startsWith("text/")) {
-                    if (mimeType.equalsIgnoreCase("text/html")) {
-                        extension = ".html";
-                    } else {
-                        extension = ".txt";
-                    }
-                } else {
-                    extension = ".bin";
-                }
-            }
-        } else {
-            if (extension == null && mimeType != null) {
-                // Compare the last segment of the extension against the mime type.
-                // If there's a mismatch, discard the entire extension.
-                int lastDotIndex = filename.lastIndexOf('.');
-                String typeFromExt = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
-                        filename.substring(lastDotIndex + 1));
-                if (typeFromExt != null && !typeFromExt.equalsIgnoreCase(mimeType)) {
-                    extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
-                    if (extension != null) {
-                        extension = "." + extension;
-                    }
-                }
-            }
-            if (extension == null) {
-                extension = filename.substring(dotIndex);
-            }
-            filename = filename.substring(0, dotIndex);
+        if (extension == null) {
+            return mimeTypeExtension == null ? filename : filename + mimeTypeExtension;
         }
 
-        return filename + extension;
+        // URL에서 얻은 이름(view.html 등)은 실제 형식과 다를 수 있어, 형식이 분명한 mime type과
+        // 다르면 확장자를 바꾼다. 서버가 정해 준 이름이나 octet-stream 응답이면 확장자를 그대로 둔다
+        if (isFilenameFromUrl && mimeTypeExtension != null) {
+            String typeFromExtension = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                    extension.substring(1).toLowerCase(Locale.ROOT));
+            if (typeFromExtension != null && !typeFromExtension.equalsIgnoreCase(normalizedMimeType)) {
+                return filename.substring(0, filename.length() - extension.length()) + mimeTypeExtension;
+            }
+        }
+
+        return filename;
+    }
+
+    private static final Pattern EXTENSION_PATTERN = Pattern.compile("\\.[0-9a-zA-Z]{1,10}$");
+
+    // 형식을 알려주지 않는 mime type. 여기에 맞춰 확장자를 정하면 MimeTypeMap이 .bin을 돌려준다
+    private static final Set<String> GENERIC_MIME_TYPES = new HashSet<>(Arrays.asList(
+            "application/octet-stream",
+            "binary/octet-stream",
+            "application/binary",
+            "application/unknown",
+            "application/x-unknown",
+            "application/download",
+            "application/x-download",
+            "application/force-download"));
+
+    // MimeTypeMap에 없는 한글 문서 mime type
+    private static final Map<String, String> EXTENSION_BY_MIME_TYPE = new HashMap<>();
+
+    static {
+        EXTENSION_BY_MIME_TYPE.put("application/haansofthwp", "hwp");
+        EXTENSION_BY_MIME_TYPE.put("application/vnd.hancom.hwp", "hwp");
+        EXTENSION_BY_MIME_TYPE.put("application/haansofthwpx", "hwpx");
+        EXTENSION_BY_MIME_TYPE.put("application/vnd.hancom.hwpx", "hwpx");
+    }
+
+    @Nullable
+    private static String normalizeMimeType(@Nullable String mimeType) {
+        if (mimeType == null) {
+            return null;
+        }
+
+        int parameterIndex = mimeType.indexOf(';');
+        String normalized = (parameterIndex < 0 ? mimeType : mimeType.substring(0, parameterIndex))
+                .trim()
+                .toLowerCase(Locale.ROOT);
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    /** ".hwp"처럼 점을 붙여 돌려주고, 형식을 알 수 없는 mime type이면 null */
+    @Nullable
+    private static String getExtensionFromMimeType(@Nullable String mimeType) {
+        if (mimeType == null || GENERIC_MIME_TYPES.contains(mimeType)) {
+            return null;
+        }
+
+        String extension = EXTENSION_BY_MIME_TYPE.get(mimeType);
+        if (extension == null) {
+            extension = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType);
+        }
+        if (extension == null && mimeType.startsWith("text/")) {
+            extension = "txt";
+        }
+        return extension == null ? null : "." + extension;
+    }
+
+    /** 이름 끝의 확장자(".hwp" 등). "붙임1. 설문지"처럼 확장자로 보이지 않으면 null */
+    @Nullable
+    private static String getExtension(String filename) {
+        Matcher matcher = EXTENSION_PATTERN.matcher(filename);
+        return matcher.find() ? matcher.group() : null;
     }
 
     /** Regex used to find the parameters of content-disposition headers */
@@ -309,19 +357,5 @@ public final class URLUtil {
         } catch (CharacterCodingException | IllegalArgumentException ex) {
             return null;
         }
-    }
-
-    public static String getExtension(String filename) {
-        if (filename == null || filename.isBlank()) {
-            return null;
-        }
-
-        int dotIndex = filename.lastIndexOf('.');
-        // 점이 없거나, 점이 맨 앞/끝에 있으면 확장자 없음
-        if (dotIndex <= 0 || dotIndex == filename.length() - 1) {
-            return null;
-        }
-
-        return "." + filename.substring(dotIndex + 1);
     }
 }
